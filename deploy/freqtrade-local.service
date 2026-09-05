@@ -1,0 +1,30 @@
+[Unit]
+Description=Freqtrade (freqtrade-local) Daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Adjust these two paths if you clone the repo somewhere other than ~/freqtrade-local
+WorkingDirectory=%h/freqtrade-local
+ExecStart=%h/freqtrade-local/.venv/bin/freqtrade trade --sd-notify \
+    --config %h/freqtrade-local/user_data/config.json \
+    --logfile %h/freqtrade-local/user_data/logs/freqtrade.log \
+    --db-url sqlite:///%h/freqtrade-local/user_data/tradesv3.sqlite
+
+Type=notify
+NotifyAccess=all
+
+Restart=always
+StartLimitInterval=1min
+StartLimitBurst=5
+TimeoutStartSec=1min
+# Use (process_throttle_secs * 2) or longer
+WatchdogSec=20
+
+# Keep this process from starving your other 2 apps on the box if it ever leaks/spikes
+MemoryMax=400M
+MemoryHigh=300M
+CPUQuota=50%
+
+[Install]
+WantedBy=default.target
