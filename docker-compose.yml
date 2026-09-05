@@ -20,6 +20,12 @@ services:
     #   dockerfile: "./docker/Dockerfile.custom"
     restart: unless-stopped
     container_name: freqtrade
+    # Hard cap so a wide pairlist (e.g. all futures pairs) can't starve the
+    # other apps (HRMS/CRM) sharing this 4GB box. memswap_limit == mem_limit
+    # means it can't spill into the shared swap either.
+    mem_limit: 1g
+    memswap_limit: 1g
+    cpus: 1.5
     volumes:
       - "./user_data:/freqtrade/user_data"
     # Expose api on port 8080 (localhost only)
@@ -33,4 +39,4 @@ services:
       --logfile /freqtrade/user_data/logs/freqtrade.log
       --db-url sqlite:////freqtrade/user_data/tradesv3.sqlite
       --config /freqtrade/user_data/config.json
-      --strategy SampleStrategy
+      --strategy ClucMay72018
