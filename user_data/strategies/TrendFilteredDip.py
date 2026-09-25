@@ -57,7 +57,6 @@ class TrendFilteredDip(IStrategy):
 
     process_only_new_candles = True
     use_exit_signal = True
-    exit_profit_only = False
     startup_candle_count = 210
 
     # Entry thresholds (hyperopt-tuned; see docstring above).
@@ -67,11 +66,72 @@ class TrendFilteredDip(IStrategy):
     REQUIRE_EMA50_CONFIRM = True
     REQUIRE_EMA_RISING = True
 
+    # --- Falling-knife entry filter (Phase 5) -----------------------------
+    # Blocks entries on a candle whose single-candle decline is itself an
+    # outsized multiple of recent ATR, i.e. the "dip" is a crash candle
+    # piercing the BB lower band rather than a gentle pullback into it.
+    # Disabled by default -- enable and backtest before relying on it.
+    USE_FALLING_KNIFE_FILTER = True
+    FALLING_KNIFE_ATR_MULT = 2.0
+
+    # --- Exit-signal profit gating (Phase 7) ------------------------------
+    # Native Freqtrade knobs: when True, exit_long signals are only honoured
+    # once the trade is at/above EXIT_SIGNAL_MIN_PROFIT, so a losing/flat
+    # trade rides the stoploss/trailing-stop instead of being closed by a
+    # weak mean-reversion signal. Off by default (matches current live
+    # behaviour) -- flip and backtest before relying on it.
+    exit_profit_only = False
+    exit_profit_offset = 0.0
+
+    # --- Protections (Phase 2 / Phase 3) ----------------------------------
+    # Pair-level cooldown: block re-entry into a pair for N candles after
+    # THAT PAIR hits a stoploss (StoplossGuard w/ only_per_pair=True is more
+    # targeted than a blanket CooldownPeriod, which would also block
+    # re-entry after a normal profitable exit).
+    USE_PAIR_STOPLOSS_COOLDOWN = False
+    PAIR_STOPLOSS_COOLDOWN_LOOKBACK_CANDLES = 24
+    PAIR_STOPLOSS_COOLDOWN_TRADE_LIMIT = 1
+    PAIR_STOPLOSS_COOLDOWN_STOP_CANDLES = 6
+
+    # Bot-wide circuit breaker: pause ALL new entries after N stoplosses in
+    # a short window, regardless of pair (catches a broad regime shift, not
+    # just one bad pair).
+    USE_CONSECUTIVE_LOSS_GUARD = False
+    CONSECUTIVE_LOSS_TRADE_LIMIT = 2
+    CONSECUTIVE_LOSS_LOOKBACK_CANDLES = 24
+    CONSECUTIVE_LOSS_STOP_CANDLES = 12
+
+    @property
+    def protections(self):
+        prot = []
+        if self.USE_PAIR_STOPLOSS_COOLDOWN:
+            prot.append(
+                {
+                    "method": "StoplossGuard",
+                    "lookback_period_candles": self.PAIR_STOPLOSS_COOLDOWN_LOOKBACK_CANDLES,
+                    "trade_limit": self.PAIR_STOPLOSS_COOLDOWN_TRADE_LIMIT,
+                    "stop_duration_candles": self.PAIR_STOPLOSS_COOLDOWN_STOP_CANDLES,
+                    "only_per_pair": True,
+                }
+            )
+        if self.USE_CONSECUTIVE_LOSS_GUARD:
+            prot.append(
+                {
+                    "method": "StoplossGuard",
+                    "lookback_period_candles": self.CONSECUTIVE_LOSS_LOOKBACK_CANDLES,
+                    "trade_limit": self.CONSECUTIVE_LOSS_TRADE_LIMIT,
+                    "stop_duration_candles": self.CONSECUTIVE_LOSS_STOP_CANDLES,
+                    "only_per_pair": False,
+                }
+            )
+        return prot
+
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         dataframe["rsi"] = ta.RSI(dataframe, timeperiod=14)
         dataframe["adx"] = ta.ADX(dataframe)
         dataframe["ema200"] = ta.EMA(dataframe, timeperiod=200)
         dataframe["ema50"] = ta.EMA(dataframe, timeperiod=50)
+        dataframe["atr"] = ta.ATR(dataframe, timeperiod=14)
 
         bollinger = qtpylib.bollinger_bands(
             qtpylib.typical_price(dataframe), window=20, stds=2
@@ -81,6 +141,12 @@ class TrendFilteredDip(IStrategy):
         dataframe["bb_upperband"] = bollinger["upper"]
 
         dataframe["volume_mean_30"] = dataframe["volume"].rolling(window=30).mean()
+
+        # Single-candle decline, normalised by ATR, for the falling-knife
+        # filter. Kept out of populate_entry_trend so it's computed once.
+        dataframe["candle_drop_atr"] = (dataframe["open"] - dataframe["close"]) / dataframe[
+            "atr"
+        ].replace(0, float("nan"))
 
         return dataframe
 
@@ -104,6 +170,8 @@ class TrendFilteredDip(IStrategy):
             conditions.append(dataframe["ema50"] > dataframe["ema200"])
         if self.REQUIRE_EMA_RISING:
             conditions.append(dataframe["ema200"] > dataframe["ema200"].shift(5))
+        if self.USE_FALLING_KNIFE_FILTER:
+            conditions.append(dataframe["candle_drop_atr"] < self.FALLING_KNIFE_ATR_MULT)
 
         combined = conditions[0]
         for c in conditions[1:]:
